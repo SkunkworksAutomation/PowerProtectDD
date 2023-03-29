@@ -1,0 +1,111 @@
+---
+- name: "Create a user, assign boost access, create storage units and assign user"
+  hosts: localhost
+  collections:
+    - community.general
+  gather_facts: false
+  become: no
+   
+  vars:
+  vars_files:
+    - vars/credentials.yml
+
+  tasks:
+  # WAIT FOR HTTPS RESPONSE FROM POWERPROTECT DATA DOMAIN  
+  - name: "( {{ddve_host}} ): Waiting for HTTPS connectivity."
+    wait_for:
+      host: "{{ddve_host}}.{{ad_domain}}"
+      port: 443
+      state: started
+      delay: 1
+      sleep: 60
+      timeout: 600
+    register: waitforddve
+
+# AUTHENTICATE TO DDVE REST API
+  - name: "( {{ddve_host}} ): Authenticate to PowerProtect DD REST API"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/auth
+      method: POST
+      force_basic_auth: no
+      validate_certs: no
+      return_content: yes
+      body_format: json
+      body: |
+        {
+          "username": "{{ppdd_id}}",
+          "password": "{{ppdd_pwd}}"
+        }
+      status_code: 201
+    register: dd_token
+
+  - name:
+    debug:
+      var:  dd_token.x_dd_auth_token
+
+# CREATE THE DDBOOST USER
+  - name: "( {{ddve_host}} ): Create the boost user"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/dd-systems/0/users
+      method: POST
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "name": "{{ddve_boost_user}}",
+          "role": "none",
+          "password":"{{ppdd_pwd}}"
+        }
+      return_content: yes
+      status_code: 201
+    register: create_user
+
+# ASSIGN BOOST ACCESS
+  - name: "( {{ddve_host}} ): Assign user boost access"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/dd-systems/0/protocols/ddboost/users
+      method: PUT
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "user": "{{ddve_boost_user}}",
+          "operation": "assign"
+        }
+      return_content: yes
+      status_code: 200
+    register: assign_user
+
+# CREATE BOOST ACCESS
+  - name: "( {{ddve_host}} ): Create the storage unit"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/dd-systems/0/protocols/ddboost/storage-units
+      method: POST
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "name": "{{item}}",
+          "user": "{{ddve_boost_user}}"
+        }
+      return_content: yes
+      status_code: 201
+    loop: 
+      - dd1-mtree-01
+      - dd1-mtree-02
+      - dd1-mtree-03
+      - dd1-mtree-04
+      - dd1-mtree-05
+    register: create_mtree1

@@ -1,0 +1,298 @@
+---
+- name: "Deploy PowerProtect DDMC and PowerProtect DDVE"
+  hosts: localhost
+  collections:
+    - community.vmware
+    - community.general
+  gather_facts: false
+  become: no
+   
+  vars:
+  vars_files:
+    - vars/credentials.yml
+
+  tasks:
+# DEPLOY THE DDMC OVA TO VCENTER
+  - name: "( {{ddmc_host}} ): Deploy PowerProtect Data Domain Management Center"
+    vmware_deploy_ovf:
+      hostname: "{{vcenter_host}}"
+      username: "{{vcenter_id}}"
+      password: "{{vcenter_pwd}}"
+      validate_certs: no
+      name: "{{ddmc_host}}"
+      datacenter: "{{vcenter_dc}}"
+      folder: "{{vcenter_folder}}"
+      datastore: "{{vcenter_ds}}"
+      disk_provisioning: thin
+      networks: 
+        "VM_Network": "{{vcenter_network}}"
+      ova: "{{artifact_path}}/{{ddmc_ova}}"
+      allow_duplicates: no
+      fail_on_spec_warnings: no
+      wait: no
+      wait_for_ip_address: no
+      inject_ovf_env: yes
+      properties:
+        hostname: "{{ddmc_host}}.{{ad_domain}}"
+        ipAddress: "{{ddmc_ip}}"
+        netmask: "{{ddve_netmask}}"
+        gateway: "{{ddve_gateway}}"
+        dnsServer1: "{{ddve_dns1}}"
+        dnsServer2: "{{ddve_dns2}}"
+      power_on: yes
+
+# DEPLOY THE DDVE OVA TO VCENTER
+  - name: Deploy PowerProtect Data Domain
+    vmware_deploy_ovf:
+      hostname: "{{vcenter_host}}"
+      username: "{{vcenter_id}}"
+      password: "{{vcenter_pwd}}"
+      validate_certs: no
+      name: "{{ddve_host}}"
+      datacenter: "{{vcenter_dc}}"
+      folder: "{{vcenter_folder}}"
+      datastore: "{{vcenter_ds}}"
+      disk_provisioning: thin
+      networks: 
+        "VM Network 1": "{{vcenter_network}}"
+        "VM Network 2": "{{vcenter_network}}"
+      ova: "{{artifact_path}}/{{ddve_ova}}"
+      allow_duplicates: no
+      fail_on_spec_warnings: no
+      wait: no
+      wait_for_ip_address: no
+      inject_ovf_env: yes
+      properties:
+        hostname: "{{ddve_host}}.{{ad_domain}}"
+        ipAddress: "{{ddve_ip}}"
+        netmask: "{{ddve_netmask}}"
+        gateway: "{{ddve_gateway}}"
+        dnsServer1: "{{ddve_dns1}}"
+        dnsServer2: "{{ddve_dns2}}"
+      power_on: yes
+ 
+ # ADD VDISK TO DDVE FOR ACTIVE TIER 
+  - name: "( {{ddve_host}} ): Adding {{ddve_disk_size}} GiB disk for active tier."
+    vmware_guest_disk:
+      hostname: "{{vcenter_host}}"
+      username: "{{vcenter_id}}"
+      password: "{{vcenter_pwd}}"
+      datacenter: "{{vcenter_dc}}"
+      name: "{{ddve_host}}"
+      disk:
+        - size_gb: "{{ddve_disk_size}}"
+          type: "{{ddve_disk_type}}"
+          state: present
+          datastore: "{{vcenter_ds}}"
+          disk_mode: "independent_persistent"
+          scsi_controller: 0
+          unit_number: 2
+      validate_certs: no
+    register: disk_facts
+
+# WAIT FOR HTTPS RESPONSE FROM POWERPROTECT DATA DOMAIN  
+  - name: "( {{ddve_host}} ): Waiting for HTTPS connectivity."
+    wait_for:
+      host: "{{ddve_host}}.{{ad_domain}}"
+      port: 443
+      state: started
+      delay: 1
+      sleep: 60
+      timeout: 600
+    register: waitforddve
+
+# AUTHENTICATE TO DDVE REST API
+  - name: "( {{ddve_host}} ): Authenticate to PowerProtect DD REST API"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/auth
+      method: POST
+      force_basic_auth: no
+      validate_certs: no
+      return_content: yes
+      body_format: json
+      body: |
+        {
+          "username": "{{ppdd_id}}",
+          "password": "{{ddve_old_pwd}}"
+        }
+      status_code: 201
+    register: dd_token
+
+  - name:
+    debug:
+      var:  dd_token.x_dd_auth_token
+
+# ADD DEV3 DISK TO THE ACTIVE TIER
+  - name: "( {{ddve_host}} ): Add dev3 to the active tier"
+    uri:
+      url: https://{{ddve_host}}:3009/api/v1/dd-systems/0/file-systems/block-storages
+      method: PUT
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "disks": [
+            "dev3"
+          ]
+        }
+      return_content: yes
+      status_code: 200
+    register: disks
+
+# CREATE THE FILESYSTEM
+  - name: "( {{ddve_host}} ): Create the filesystem"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/dd-systems/0/file-systems
+      method: PUT
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "operation": "create",
+          "write_zeros": false
+        }
+      timeout: 600
+      return_content: yes
+      status_code: 200
+    register: create_filesys
+
+# ENABLE THE FILESYSTEM
+  - name: "( {{ddve_host}} ): Enable the filesystem"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/dd-systems/0/file-systems
+      method: PUT
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "operation": "enable"
+        }
+      timeout: 600
+      return_content: yes
+      status_code: 200
+    register: enable_filesys
+
+# ENABLE THE DDBOOST PROTOCOL
+  - name: "( {{ddve_host}} ): Enable the boost protocol"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/dd-systems/0/protocols/ddboost
+      method: PUT
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "operation": "enable"
+        }
+      return_content: yes
+      status_code: 200
+    register: boost
+
+# SET THE SYSTEM PASSPHRASE
+  - name: "( {{ddve_host}} ): Set the system passphrase"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v3.0/dd-systems/0/systems
+      method: PUT
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "operation": "set_pphrase",
+          "pphrase_request": {
+            "new_pphrase": "{{ppdd_pwd}}"
+          }
+        }
+      return_content: yes
+      status_code: 200
+    register: passphrase
+
+# UPDATE THE SYSADMIN PASSWORD
+  - name: "( {{ddve_host}} ): Set the sysadmin password"
+    uri:
+      url: https://{{ddve_host}}:3009/rest/v1.0/dd-systems/0/users/{{ppdd_id}}
+      method: PUT
+      headers:
+        X-DD-AUTH-TOKEN: "{{dd_token.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      body_format: json
+      body: |
+        {
+          "current_password": "{{ddve_old_pwd}}",
+          "new_password": "{{ppdd_pwd}}"
+        }
+      return_content: yes
+      status_code: 200
+    register: update_user
+
+# WAIT FOR HTTPS RESPONSE FROM POWERPROTECT DATA DOMAIN  
+  - name: "( {{ddmc_host}} ): Waiting for HTTPS connectivity."
+    wait_for:
+      host: "{{ddmc_host}}.{{ad_domain}}"
+      port: 443
+      state: started
+      delay: 1
+      sleep: 60
+      timeout: 600
+    register: waitforddmc
+
+# AUTHENTICATE TO DDMC REST API
+  - name: "( {{ddmc_host}} ): Authenticate to PowerProtect DDMC REST API"
+    uri:
+      url: https://{{ddmc_host}}:3009/rest/v1.0/auth
+      method: POST
+      force_basic_auth: no
+      validate_certs: no
+      return_content: yes
+      body_format: json
+      body: |
+        {
+          "username": "{{ppdd_id}}",
+          "password": "{{ddmc_old_pwd}}"
+        }
+      status_code: 201
+    register: mc_token1
+
+  - name: Result from get access token
+    debug:
+      var:  mc_token1.x_dd_auth_token
+
+# ADD DDVE TO DDMC
+  - name: "( {{ddmc_host}} ): Adding {{ddve_host}} to system configuration"
+    uri:
+      url: https://{{ddmc_host}}:3009/rest/v2.0/dd-systems
+      method: POST
+      headers:
+        X-DD-AUTH-TOKEN: "{{mc_token1.x_dd_auth_token}}"
+        Content-Type: "application/json"
+      force_basic_auth: no
+      validate_certs: no
+      return_content: yes
+      body_format: json
+      body: |
+        {
+          "hostname": "{{ddve_host}}.{{ad_domain}}",
+          "password": "{{ppdd_pwd}}"
+        }
+      status_code: 201
+    register: add_dd

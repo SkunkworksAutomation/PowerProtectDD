@@ -24,4 +24,4 @@
         * set-migrationcommit: method to commit the mobile storage unit migration
         * set-migrationcancel: method to release migration resources
     * Tasks
-        * Task-04: example of mobile storage unit migration
+        * Task-04: example of mobile storage unit migration (Smart Scale)

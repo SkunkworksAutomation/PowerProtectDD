@@ -8,6 +8,9 @@ Import-Module .\dell.ddve.psm1 -Force
 $system = "ddve-01.vcorp.local"
 connect-restapi -Server $system
 
+<#
+    GET POWERPROTECT DD SYSTEM INFORMATION
+#>
 $query = get-system
 
 # CONVERT BYTES TO GB
